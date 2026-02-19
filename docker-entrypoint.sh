@@ -23,4 +23,8 @@ else
   echo "[entrypoint] config already exists at $CONFIG_FILE, skipping write"
 fi
 
+# Railway sets PORT env var for the expected listening port (usually 8080).
+# The gateway uses OPENCLAW_GATEWAY_PORT instead, so bridge the two.
+export OPENCLAW_GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-${PORT:-8080}}"
+
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan "$@"
