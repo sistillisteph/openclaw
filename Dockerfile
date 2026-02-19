@@ -49,6 +49,17 @@ RUN chown -R node:node /app
 
 RUN mkdir -p /data/.openclaw /data/.clawdbot /data/workspace && chown -R node:node /data
 
+# Write default Railway/reverse-proxy config into the image.
+# trustedProxies: trust Railway's internal proxy network so client IPs are resolved correctly.
+# allowInsecureAuth: allow token-only auth to skip device pairing over HTTP
+#   (Railway terminates TLS at the edge, so the container sees HTTP).
+RUN echo '{"gateway":{"trustedProxies":["100.64.0.0/10"],"controlUi":{"allowInsecureAuth":true}}}' \
+  > /data/.openclaw/openclaw.json
+
+# Tell the gateway to read config/state from /data/.openclaw (the persistent volume).
+# Without this it defaults to ~/.openclaw which is the root user's homedir.
+ENV OPENCLAW_STATE_DIR=/data/.openclaw
+
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
@@ -56,8 +67,8 @@ RUN chmod +x /app/docker-entrypoint.sh
 # The node:22-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
 # Start gateway server via entrypoint script.
-# The entrypoint writes default config (trustedProxies, allowInsecureAuth) to the
-# volume if not already present, then starts the gateway bound to all interfaces.
+# The entrypoint writes config to the volume if needed, then starts the gateway
+# bound to all interfaces.
 #
 # Required env var for auth: OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
