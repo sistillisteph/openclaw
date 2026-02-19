@@ -49,13 +49,15 @@ RUN chown -R node:node /app
 
 RUN mkdir -p /data/.openclaw /data/.clawdbot /data/workspace && chown -R node:node /data
 
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Security hardening: Run as non-root user
 # The node:22-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
+# Start gateway server via entrypoint script.
+# The entrypoint writes default config (trustedProxies, allowInsecureAuth) to the
+# volume if not already present, then starts the gateway bound to all interfaces.
 #
-# For container platforms requiring external health checks:
-#   1. Set OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD env var
-#   2. Override CMD: ["node","openclaw.mjs","gateway","--allow-unconfigured","--bind","lan"]
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+# Required env var for auth: OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
