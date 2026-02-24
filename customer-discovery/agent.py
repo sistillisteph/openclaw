@@ -2,14 +2,13 @@
 Customer Discovery Agent
 
 Monitors HN, Reddit, and Twitter/X for people expressing pain points
-about AI agents. Analyzes posts with Claude, writes to Notion, and
-sends high-signal alerts via Telegram.
+about AI agents. Analyzes posts with Claude and writes top results to Notion.
 
 Usage:
     python agent.py              # Run once (all sources)
     python agent.py --source hn  # Run HN only
     python agent.py --source reddit
-    python agent.py --schedule   # Run on loop (every 4 hours)
+    python agent.py --schedule   # Run on loop (every 6 hours)
 """
 
 import os
@@ -21,6 +20,7 @@ import logging
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections import Counter
 
 import httpx
 import anthropic
@@ -35,17 +35,18 @@ NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get(
     "NOTION_DATABASE_ID", "8c460c44-2062-488b-aa48-ce558976889a"
 )
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # How far back to look (hours)
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "24"))
 
-# Minimum opportunity score to trigger a Telegram alert
-ALERT_THRESHOLD = int(os.environ.get("ALERT_THRESHOLD", "7"))
+# Minimum opportunity score to write to Notion
+MIN_SCORE = int(os.environ.get("MIN_SCORE", "9"))
 
-# Run interval in seconds when using --schedule (default 4 hours)
-RUN_INTERVAL = int(os.environ.get("RUN_INTERVAL", str(4 * 3600)))
+# Max results to write per run
+MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "10"))
+
+# Run interval in seconds when using --schedule (default 6 hours)
+RUN_INTERVAL = int(os.environ.get("RUN_INTERVAL", str(6 * 3600)))
 
 # Search terms for HN
 HN_SEARCH_TERMS = [
@@ -73,11 +74,13 @@ REDDIT_SUBREDDITS = [
 # State file to track already-processed posts
 STATE_DIR = Path(os.environ.get("STATE_DIR", "."))
 STATE_FILE = STATE_DIR / "seen_posts.json"
+# Tracks recurring pain point themes across runs
+THEME_FILE = STATE_DIR / "pain_themes.json"
 
 log = logging.getLogger("discovery")
 
 # ---------------------------------------------------------------------------
-# Deduplication
+# Deduplication & Theme Tracking
 # ---------------------------------------------------------------------------
 
 
@@ -93,6 +96,53 @@ def save_seen(seen: set[str]):
 
 def post_id(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def load_themes() -> dict[str, list[dict]]:
+    """Load recurring pain point theme tracker.
+
+    Structure: { "category::keyword": [{"title": ..., "url": ..., "date": ...}, ...] }
+    """
+    if THEME_FILE.exists():
+        try:
+            return json.loads(THEME_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_themes(themes: dict[str, list[dict]]):
+    THEME_FILE.write_text(json.dumps(themes))
+
+
+def update_themes(results: list[dict], themes: dict[str, list[dict]]) -> dict[str, int]:
+    """Track recurring themes and return mention counts for each result's categories."""
+    now = datetime.now(timezone.utc).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+
+    mention_counts: dict[str, int] = {}
+
+    for r in results:
+        for cat in r.get("categories", []):
+            key = cat.lower()
+            if key not in themes:
+                themes[key] = []
+
+            # Add this post
+            themes[key].append({
+                "title": r["title"][:100],
+                "url": r["url"],
+                "date": now,
+            })
+
+            # Prune entries older than 14 days
+            themes[key] = [
+                entry for entry in themes[key] if entry["date"] > cutoff
+            ]
+
+            mention_counts[key] = len(themes[key])
+
+    return mention_counts
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +248,7 @@ Analyze the following batch of posts from online forums. For EACH post, determin
    - How acute is the pain? (frustrated vs. mildly annoyed)
    - How many people likely share this problem?
    - Could a product solve this?
+   Be very selective — only give 9 or 10 to posts showing genuine, acute frustration with a clear product opportunity.
 4. Extract the most quotable snippet (1-2 sentences max)
 5. Write a one-sentence summary of the pain point
 
@@ -282,7 +333,7 @@ def analyze_posts(posts: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def write_to_notion(results: list[dict], seen: set[str]):
+def write_to_notion(results: list[dict], seen: set[str], theme_counts: dict[str, int]):
     """Write pain-point results to the Notion database."""
     if not results or not NOTION_API_KEY:
         return
@@ -296,6 +347,20 @@ def write_to_notion(results: list[dict], seen: set[str]):
             continue
 
         categories = r.get("categories", [])
+
+        # Build "Similar Posts This Week" — max mention count across this post's categories
+        similar_count = max(
+            (theme_counts.get(c.lower(), 0) for c in categories),
+            default=0,
+        )
+
+        # Build notes with recurring theme info
+        notes_parts = []
+        for cat in categories:
+            count = theme_counts.get(cat.lower(), 0)
+            if count > 1:
+                notes_parts.append(f"{cat} mentioned {count}x in last 14 days")
+        notes = "; ".join(notes_parts) if notes_parts else ""
 
         properties: dict = {
             "Post Title": {"title": [{"text": {"content": r["title"][:200]}}]},
@@ -313,6 +378,10 @@ def write_to_notion(results: list[dict], seen: set[str]):
             "Pain Point Category": {
                 "multi_select": [{"name": c} for c in categories if c]
             },
+            "Similar Posts This Week": {"number": similar_count},
+            "Notes": {
+                "rich_text": [{"text": {"content": notes[:2000]}}]
+            },
         }
 
         try:
@@ -329,78 +398,6 @@ def write_to_notion(results: list[dict], seen: set[str]):
 
 
 # ---------------------------------------------------------------------------
-# Telegram Alerts
-# ---------------------------------------------------------------------------
-
-
-def send_telegram(text: str):
-    """Send a message via Telegram bot API."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("Telegram not configured, skipping alert")
-        return
-
-    with httpx.Client() as client:
-        try:
-            client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-                timeout=10,
-            )
-        except Exception as e:
-            log.error(f"Telegram send failed: {e}")
-
-
-def send_alerts(results: list[dict], seen_before: set[str]):
-    """Send Telegram alerts for high-signal posts."""
-    high_signal = [
-        r
-        for r in results
-        if r.get("opportunity_score", 0) >= ALERT_THRESHOLD
-        and post_id(r["url"]) not in seen_before
-    ]
-
-    if not high_signal:
-        return
-
-    for r in high_signal:
-        categories = ", ".join(r.get("categories", []))
-        msg = (
-            f"<b>Pain Point Found ({r['source']})</b>\n"
-            f"Score: {r.get('opportunity_score', '?')}/10\n"
-            f"Category: {categories}\n\n"
-            f"<b>{r['title'][:200]}</b>\n"
-            f"<i>\"{r.get('key_quote', 'N/A')[:300]}\"</i>\n\n"
-            f"{r.get('summary', '')[:200]}\n\n"
-            f"<a href=\"{r['url']}\">View post</a> | "
-            f"Engagement: {r.get('engagement', 0)}"
-        )
-        send_telegram(msg)
-        time.sleep(0.5)  # rate limit
-
-    # Daily digest summary
-    if len(high_signal) > 1:
-        category_counts: dict[str, int] = {}
-        for r in high_signal:
-            for c in r.get("categories", []):
-                category_counts[c] = category_counts.get(c, 0) + 1
-
-        top_categories = sorted(category_counts.items(), key=lambda x: -x[1])[:5]
-        cat_lines = "\n".join(f"  {c}: {n}" for c, n in top_categories)
-
-        summary = (
-            f"<b>Discovery Summary</b>\n"
-            f"Found {len(high_signal)} high-signal posts (score >= {ALERT_THRESHOLD})\n\n"
-            f"<b>Top pain points:</b>\n{cat_lines}"
-        )
-        send_telegram(summary)
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -409,7 +406,7 @@ def run_discovery(sources: list[str] | None = None):
     """Run one cycle of customer discovery."""
     sources = sources or ["hn", "reddit"]
     seen = load_seen()
-    seen_before = set(seen)  # snapshot for alert dedup
+    themes = load_themes()
 
     all_posts: list[dict] = []
 
@@ -417,7 +414,6 @@ def run_discovery(sources: list[str] | None = None):
         if "hn" in sources:
             log.info("Scraping Hacker News...")
             hn_posts = scrape_hn(client)
-            # Filter already-seen
             hn_posts = [p for p in hn_posts if post_id(p["url"]) not in seen]
             log.info(f"  Found {len(hn_posts)} new HN posts")
             all_posts.extend(hn_posts)
@@ -435,14 +431,21 @@ def run_discovery(sources: list[str] | None = None):
 
     log.info(f"Analyzing {len(all_posts)} posts with Claude...")
     results = analyze_posts(all_posts)
-    log.info(f"  Found {len(results)} pain points")
+    log.info(f"  Found {len(results)} pain points total")
+
+    # Filter to only 9+ scores and take top 10
+    results = [r for r in results if r.get("opportunity_score", 0) >= MIN_SCORE]
+    results.sort(key=lambda r: (-r.get("opportunity_score", 0), -r.get("engagement", 0)))
+    results = results[:MAX_RESULTS]
+    log.info(f"  {len(results)} posts scored {MIN_SCORE}+/10 (capped at {MAX_RESULTS})")
+
+    # Update recurring theme tracker
+    theme_counts = update_themes(results, themes)
+    save_themes(themes)
 
     if results:
         log.info("Writing to Notion...")
-        write_to_notion(results, seen)
-
-        log.info("Sending Telegram alerts...")
-        send_alerts(results, seen_before)
+        write_to_notion(results, seen, theme_counts)
 
     # Mark all scraped posts as seen (even non-pain-points)
     for p in all_posts:
@@ -480,10 +483,6 @@ def main():
         missing.append("ANTHROPIC_API_KEY")
     if not NOTION_API_KEY:
         missing.append("NOTION_API_KEY")
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not TELEGRAM_CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
     if missing:
         log.warning(f"Missing env vars (some features disabled): {', '.join(missing)}")
 
