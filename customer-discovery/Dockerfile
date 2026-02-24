@@ -7,8 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py .
 
-# Persistent state for dedup tracking
-VOLUME /data
-ENV STATE_DIR=/data
+# State stored in /app (Railway handles persistence via volumes in dashboard)
+ENV STATE_DIR=/app
 
 CMD ["python", "agent.py", "--schedule"]
