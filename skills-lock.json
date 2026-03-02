@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "crow": {
+      "source": "Fallomai/skills",
+      "sourceType": "github",
+      "computedHash": "9b392c2eff9585ef027cec0494bbbd3d7cbba87e13c86c1b3b713ed354964319"
+    },
+    "nightmarket": {
+      "source": "Fallomai/skills",
+      "sourceType": "github",
+      "computedHash": "cb5d54ca3a0109da1314333399a3198454bc2b36286a60b1409ea1a3ae20a903"
+    }
+  }
+}
