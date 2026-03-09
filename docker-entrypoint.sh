@@ -76,7 +76,23 @@ if [ -n "$CODEX_AUTH_JSON" ]; then
   mkdir -p "$HOME/.codex"
   echo "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
   chmod 600 "$HOME/.codex/auth.json"
+  # Default to Codex model when no explicit DEFAULT_MODEL is set.
+  : "${DEFAULT_MODEL:=openai-codex/gpt-5.3-codex}"
   echo "[entrypoint] wrote Codex auth.json from CODEX_AUTH_JSON env var"
+fi
+
+# If DEFAULT_MODEL is set (explicitly or via Codex above), patch the config.
+if [ -n "$DEFAULT_MODEL" ]; then
+  node -e "
+    const fs = require('fs');
+    const p = '$CONFIG_FILE';
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+    cfg.agents = cfg.agents || {};
+    cfg.agents.defaults = cfg.agents.defaults || {};
+    cfg.agents.defaults.model = { primary: '$DEFAULT_MODEL' };
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n');
+  "
+  echo "[entrypoint] default model set to $DEFAULT_MODEL"
 fi
 
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan "$@"
