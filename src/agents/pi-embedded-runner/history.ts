@@ -1,6 +1,12 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { OpenClawConfig } from "../../config/config.js";
 
+/**
+ * Fallback history limit when no per-channel or per-DM limit is configured.
+ * Keeps the last 20 user turns to prevent unbounded context growth.
+ */
+export const DEFAULT_HISTORY_LIMIT = 20;
+
 const THREAD_SUFFIX_REGEX = /^(.*)(?::(?:thread|topic):\d+)$/i;
 
 function stripThreadSuffix(value: string): string {
@@ -45,7 +51,7 @@ export function getHistoryLimitFromSessionKey(
   config: OpenClawConfig | undefined,
 ): number | undefined {
   if (!sessionKey || !config) {
-    return undefined;
+    return DEFAULT_HISTORY_LIMIT;
   }
 
   const parts = sessionKey.split(":").filter(Boolean);
@@ -53,7 +59,7 @@ export function getHistoryLimitFromSessionKey(
 
   const provider = providerParts[0]?.toLowerCase();
   if (!provider) {
-    return undefined;
+    return DEFAULT_HISTORY_LIMIT;
   }
 
   const kind = providerParts[1]?.toLowerCase();
@@ -87,7 +93,7 @@ export function getHistoryLimitFromSessionKey(
 
   const providerConfig = resolveProviderConfig(config, provider);
   if (!providerConfig) {
-    return undefined;
+    return DEFAULT_HISTORY_LIMIT;
   }
 
   // For DM sessions: per-DM override -> dmHistoryLimit.
@@ -96,16 +102,16 @@ export function getHistoryLimitFromSessionKey(
     if (userId && providerConfig.dms?.[userId]?.historyLimit !== undefined) {
       return providerConfig.dms[userId].historyLimit;
     }
-    return providerConfig.dmHistoryLimit;
+    return providerConfig.dmHistoryLimit ?? DEFAULT_HISTORY_LIMIT;
   }
 
   // For channel/group sessions: use historyLimit from provider config
   // This prevents context overflow in long-running channel sessions
   if (kind === "channel" || kind === "group") {
-    return providerConfig.historyLimit;
+    return providerConfig.historyLimit ?? DEFAULT_HISTORY_LIMIT;
   }
 
-  return undefined;
+  return DEFAULT_HISTORY_LIMIT;
 }
 
 /**
