@@ -70,4 +70,13 @@ export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/data/.openclaw}"
 # The gateway uses OPENCLAW_GATEWAY_PORT instead, so bridge the two.
 export OPENCLAW_GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-${PORT:-8080}}"
 
+# If CODEX_AUTH_JSON is set, write it to ~/.codex/auth.json so the Codex CLI
+# can authenticate with the stored OAuth token.
+if [ -n "$CODEX_AUTH_JSON" ]; then
+  mkdir -p "$HOME/.codex"
+  echo "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
+  chmod 600 "$HOME/.codex/auth.json"
+  echo "[entrypoint] wrote Codex auth.json from CODEX_AUTH_JSON env var"
+fi
+
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan "$@"
